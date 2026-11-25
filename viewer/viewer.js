@@ -227,7 +227,12 @@ function drawMeasure(points, livePoint) {
 // ---------- DXF ----------
 function ensureDxfViewer() {
   if (!state.dxfViewer) {
-    state.dxfViewer = new DxfViewer(wrap);
+    // retainParsedDxf: true is REQUIRED — without it DxfViewer.Load
+    // returns dxf: undefined and GetDxf() is null, so every use of the
+    // parsed model (units, version, layers, snap points) throws.
+    // autoResize: true is REQUIRED — the default is a fixed 400x300
+    // canvas, which renders the drawing as a small patch in the corner.
+    state.dxfViewer = new DxfViewer(wrap, { retainParsedDxf: true, autoResize: true });
   }
   return state.dxfViewer;
 }
@@ -311,6 +316,10 @@ function ensureStlRenderer() {
   const grid = new THREE.GridHelper(100, 20, 0x9ca3af, 0xd1d5db);
   grid.name = "grid";
   scene.add(grid);
+  // Assign state.stl BEFORE starting the loop: the loop's guard returns
+  // (without scheduling the next frame) while state.stl is unset, so
+  // starting it first meant the renderer never painted a single frame.
+  state.stl = { renderer, scene, camera, controls, geometry: null, mesh: null, positions: null };
   const animate = () => {
     if (!state.stl || state.stl.renderer !== renderer) return;
     requestAnimationFrame(animate);
@@ -324,7 +333,6 @@ function ensureStlRenderer() {
     camera.updateProjectionMatrix();
     renderer.setSize(wrap.clientWidth, wrap.clientHeight);
   }).observe(wrap);
-  state.stl = { renderer, scene, camera, controls, geometry: null, mesh: null, positions: null };
   return state.stl;
 }
 
