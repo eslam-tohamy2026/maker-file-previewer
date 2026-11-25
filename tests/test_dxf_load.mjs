@@ -54,8 +54,12 @@ test("retainParsedDxf omitted — the worker returns dxf: undefined (the trap)",
     "without retainParsedDxf the parsed document is dropped — the viewer must set it");
 });
 
-test("the viewer is constructed with retainParsedDxf and autoResize", () => {
+test("the viewer is constructed with retainParsedDxf, autoResize and the current theme", () => {
   const src = fs.readFileSync(path.join(HERE, "..", "viewer", "viewer.js"), "utf8");
-  assert.match(src, /new DxfViewer\(wrap,\s*\{\s*retainParsedDxf:\s*true,\s*autoResize:\s*true\s*\}\)/,
-    "DxfViewer must be constructed with retainParsedDxf: true (else GetDxf() is null) and autoResize: true (else the canvas stays at the 400x300 default)");
+  assert.match(src, /new DxfViewer\(wrap,\s*\{[^}]*retainParsedDxf:\s*true[^}]*autoResize:\s*true[^}]*clearColor:/s,
+    "DxfViewer must be constructed with retainParsedDxf: true (else GetDxf() is null), autoResize: true (else the canvas stays at the 400x300 default) and clearColor from the current theme (else a toggle before the first load desyncs the button from the canvas)");
+  assert.match(src, /scene\.background = new THREE\.Color\(state\.darkBg \? 0x111827 : 0xffffff\)/,
+    "the STL scene background must follow the theme, not stay hardcoded light");
+  assert.match(src, /applyBackground\(\); \/\/ a fresh Load must not revert the canvas to black/,
+    "loadDxf must re-apply the theme after Load");
 });

@@ -110,13 +110,22 @@ function onMessage(fn) {
   } catch (e) { /* running as a plain web page */ }
 }
 
-// Sizes: show file units, mm and inches — never silently reinterpret.
+// Sizes: show file units, mm and inches — never silently reinterpret,
+// and never repeat the same value twice (see DxfInfo.formatSize).
 function sizeText(valueInFileUnits) {
-  const mm = state.mmPerFileUnit === null
-    ? valueInFileUnits * MM_PER_UNIT[state.assumedUnit]
-    : valueInFileUnits * state.mmPerFileUnit;
-  const unitName = state.fileUnitsName || state.assumedUnit;
-  return `${fmt(valueInFileUnits)} ${unitName}  ·  ${fmt(mm)} mm  ·  ${fmt(mm / 25.4)} in`;
+  return DxfInfo.formatSize(valueInFileUnits, state.mmPerFileUnit, state.fileUnitsName, state.assumedUnit);
+}
+
+// One place that applies the current theme to every surface: the page,
+// the DXF viewer's clear color, and the STL scene background. The theme
+// toggle calls this, and so does every file load — a viewer created
+// after the toggle (or a fresh Load) must not silently revert to black.
+function applyBackground() {
+  wrap.classList.toggle("light", !state.darkBg);
+  themeBtn.textContent = state.darkBg ? "Light bg" : "Dark bg";
+  const color = state.darkBg ? 0x111827 : 0xffffff;
+  if (state.dxfViewer) state.dxfViewer.SetClearColor(color);
+  if (state.stl && state.stl.scene) state.stl.scene.background = new THREE.Color(color);
 }
 
 function setInfoRows(rows) {
@@ -232,7 +241,14 @@ function ensureDxfViewer() {
     // parsed model (units, version, layers, snap points) throws.
     // autoResize: true is REQUIRED — the default is a fixed 400x300
     // canvas, which renders the drawing as a small patch in the corner.
-    state.dxfViewer = new DxfViewer(wrap, { retainParsedDxf: true, autoResize: true });
+    // clearColor: the viewer is created lazily, possibly AFTER the user
+    // toggled the theme — without this it starts black and the button
+    // label desyncs from the canvas.
+    state.dxfViewer = new DxfViewer(wrap, {
+      retainParsedDxf: true,
+      autoResize: true,
+      clearColor: new THREE.Color(state.darkBg ? 0x111827 : 0xffffff),
+    });
   }
   return state.dxfViewer;
 }
@@ -256,6 +272,7 @@ async function loadDxf(name, bytes) {
   } finally {
     URL.revokeObjectURL(blobUrl);
   }
+  applyBackground(); // a fresh Load must not revert the canvas to black
 
   const dxf = viewer.GetDxf();
   state.kind = "dxf";
@@ -306,7 +323,7 @@ function ensureStlRenderer() {
   renderer.domElement.style.inset = "0";
   wrap.appendChild(renderer.domElement);
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xe5e7eb);
+  scene.background = new THREE.Color(state.darkBg ? 0x111827 : 0xffffff);
   const camera = new THREE.PerspectiveCamera(45, wrap.clientWidth / wrap.clientHeight, 0.1, 10000);
   const controls = new OrbitControls(camera, renderer.domElement);
   scene.add(new THREE.AmbientLight(0xffffff, 0.9));
@@ -589,9 +606,7 @@ clearBtn.addEventListener("click", () => {
 });
 themeBtn.addEventListener("click", () => {
   state.darkBg = !state.darkBg;
-  wrap.classList.toggle("light", !state.darkBg);
-  themeBtn.textContent = state.darkBg ? "Light bg" : "Dark bg";
-  if (state.dxfViewer) state.dxfViewer.SetClearColor(state.darkBg ? 0x111827 : 0xffffff);
+  applyBackground();
 });
 unitSelect.addEventListener("change", () => {
   state.assumedUnit = unitSelect.value;

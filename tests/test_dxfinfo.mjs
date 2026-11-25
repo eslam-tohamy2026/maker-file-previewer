@@ -107,3 +107,16 @@ test("binary DXF sentinel is detected", () => {
   const text = new TextEncoder().encode("  0\nSECTION\n");
   assert.equal(DxfInfo.isBinaryDxf(text), false);
 });
+
+test("formatSize never repeats the same value twice", () => {
+  // Unitless file assumed in mm (the gear case): was "44 mm · 44 mm · 1.73 in".
+  assert.equal(DxfInfo.formatSize(44, null, null, "mm"), "44 mm  ·  1.73 in");
+  // A file actually in mm: same output, no duplicate.
+  assert.equal(DxfInfo.formatSize(44, 1, "mm", "mm"), "44 mm  ·  1.73 in");
+  // Inch file: the inch conversion would repeat the file value, so it is dropped.
+  assert.equal(DxfInfo.formatSize(10, 25.4, "in", "mm"), "10 in  ·  254 mm");
+  // Centimetre file: all three values differ, all three are shown.
+  assert.equal(DxfInfo.formatSize(10, 10, "cm", "mm"), "10 cm  ·  100 mm  ·  3.94 in");
+  // Unitless file with the inch assumption.
+  assert.equal(DxfInfo.formatSize(44, null, null, "in"), "44 in  ·  1117.6 mm");
+});

@@ -227,6 +227,29 @@
     return head.indexOf("AutoCAD Binary DXF") === 0;
   }
 
+  function fmt(v) {
+    return String(Math.round(v * 100) / 100);
+  }
+
+  // Millimetres in one ASSUMED unit, for unitless files (the unit select
+  // offers exactly mm / in / cm). Note this is keyed by NAME, unlike
+  // MM_PER_UNIT above which is keyed by $INSUNITS code.
+  const MM_PER_ASSUMED_UNIT = { mm: 1, in: 25.4, cm: 10 };
+
+  /** Format one dimension as "file units · mm · in", dropping any part
+   * that repeats an earlier one — a unitless file assumed in mm would
+   * otherwise read "44 mm · 44 mm · 1.73 in", and an inch file would
+   * repeat its own value as the inch conversion. */
+  function formatSize(valueInFileUnits, mmPerFileUnit, fileUnitsName, assumedUnit) {
+    const mm = mmPerFileUnit === null
+      ? valueInFileUnits * MM_PER_ASSUMED_UNIT[assumedUnit]
+      : valueInFileUnits * mmPerFileUnit;
+    const unitName = fileUnitsName || assumedUnit;
+    const parts = [`${fmt(valueInFileUnits)} ${unitName}`, `${fmt(mm)} mm`];
+    if (unitName !== "in") parts.push(`${fmt(mm / 25.4)} in`);
+    return [...new Set(parts)].join("  ·  ");
+  }
+
   return {
     getUnits,
     computeBBox,
@@ -235,6 +258,7 @@
     getSnapPoints,
     getUnsupported,
     isBinaryDxf,
+    formatSize,
     INSUNITS_NAMES,
     MM_PER_UNIT,
   };
