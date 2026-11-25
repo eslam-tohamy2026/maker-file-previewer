@@ -62,4 +62,6 @@ test("the viewer is constructed with retainParsedDxf, autoResize and the current
     "the STL scene background must follow the theme, not stay hardcoded light");
   assert.match(src, /applyBackground\(\); \/\/ a fresh Load must not revert the canvas to black/,
     "loadDxf must re-apply the theme after Load");
+  assert.match(src, /state\.measureText = DxfInfo\.formatSize\(res\.d, state\.mmPerFileUnit, state\.fileUnitsName, state\.assumedUnit\)/,
+    "the measure readout must use the deduped formatSize, not repeat the value as '44 mm (44 mm / 1.73 in)'");
 });

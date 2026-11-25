@@ -518,8 +518,9 @@ function onMeasureClick(point3d, canvasPoint) {
   if (state.measurePoints.length === 2) {
     const [a, b] = state.measurePoints;
     const res = measureDistance(a.model, b.model);
-    const mm = res.mm;
-    state.measureText = `${fmt(res.d)} ${state.fileUnitsName || state.assumedUnit} (${fmt(mm)} mm / ${fmt(mm / 25.4)} in)`;
+    // Same deduped format as the Size line — the old text repeated the
+    // value ("44 mm (44 mm / 1.73 in)").
+    state.measureText = DxfInfo.formatSize(res.d, state.mmPerFileUnit, state.fileUnitsName, state.assumedUnit);
     drawMeasure(state.measurePoints.map((p) => p.canvas));
     setStatus(`Measured: ${state.measureText}`);
   } else {
