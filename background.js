@@ -6,6 +6,22 @@
 
 const VIEWER_URL = chrome.runtime.getURL("viewer/index.html");
 
+// Link-preview errors are ALSO stashed in session storage: if the viewer
+// tab was just created and is still loading, the live message below is
+// missed, and the error used to vanish without a trace. The viewer reads
+// this back on startup (checkPendingPreview).
+function stashError(kind) {
+  chrome.storage.session.set({ pendingError: { kind, at: Date.now() } }).catch(() => {});
+}
+function sendError(tabId, kind, url) {
+  stashError(kind);
+  chrome.tabs.sendMessage(tabId, {
+    type: "preview-error",
+    kind,
+    url,
+  }).catch(() => {});
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "preview-file",
@@ -52,11 +68,7 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
   if (!hasPermission) {
     const granted = await chrome.permissions.request({ origins: [origin] });
     if (!granted) {
-      chrome.tabs.sendMessage(tab.id, {
-        type: "preview-error",
-        kind: "permission-declined",
-        url,
-      }).catch(() => {});
+      sendError(tab.id, "permission-declined", url);
       return;
     }
   }
@@ -68,11 +80,7 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
     // chrome.storage.session has a ~10 MB quota; large files go through
     // the drag-and-drop flow instead of failing silently here.
     if (bytes.length > 8 * 1024 * 1024) {
-      chrome.tabs.sendMessage(tab.id, {
-        type: "preview-error",
-        kind: "too-big-for-link",
-        url,
-      }).catch(() => {});
+      sendError(tab.id, "too-big-for-link", url);
       return;
     }
     await chrome.storage.session.set({
@@ -80,10 +88,6 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
     });
     chrome.tabs.sendMessage(tab.id, { type: "preview-pending" }).catch(() => {});
   } catch (err) {
-    chrome.tabs.sendMessage(tab.id, {
-      type: "preview-error",
-      kind: "fetch-failed",
-      url,
-    }).catch(() => {});
+    sendError(tab.id, "fetch-failed", url);
   }
 });

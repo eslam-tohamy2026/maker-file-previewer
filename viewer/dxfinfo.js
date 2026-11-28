@@ -58,8 +58,10 @@
   }
 
   /** Points that bound one entity (2D). Circles/arcs contribute their
-   *  full extent (centre ± radius); splines their control points. */
-  function entityExtentPoints(e) {
+   *  full extent (centre ± radius); splines their control points.
+   *  `dxf` is the parsed document (needed to resolve INSERT blocks) and
+   *  `depth` caps nested-block recursion. */
+  function entityExtentPoints(e, dxf, depth) {
     const out = [];
     if (!e || !e.type) return out;
     switch (e.type) {
@@ -89,9 +91,22 @@
       case "ELLIPSE": {
         const c = pt(e.center);
         if (c) {
+          // Group code 11 is the major-axis endpoint RELATIVE to the
+          // centre — not an absolute point. The semi-major length is
+          // |major| and the semi-minor length is |major| * axisRatio.
+          // For a rotated ellipse with semi-axis vectors a and b, the
+          // axis-aligned extent is sqrt(ax^2 + bx^2) in X and
+          // sqrt(ay^2 + by^2) in Y. (A partial ellipse still uses its
+          // full extent, same as ARC below — a safe overestimate.)
           const m = pt(e.majorAxisEndPoint) || { x: 0, y: 0 };
-          const r = Math.hypot(m.x - c.x, m.y - c.y);
-          out.push({ x: c.x - r, y: c.y - r }, { x: c.x + r, y: c.y + r });
+          const aLen = Math.hypot(m.x, m.y);
+          const ratio = typeof e.axisRatio === "number" ? e.axisRatio : 1;
+          const bLen = aLen * ratio;
+          const ux = aLen ? m.x / aLen : 1;
+          const uy = aLen ? m.y / aLen : 0;
+          const bx = -uy * bLen, by = ux * bLen; // minor axis, perpendicular
+          const ex = Math.hypot(m.x, bx), ey = Math.hypot(m.y, by);
+          out.push({ x: c.x - ex, y: c.y - ey }, { x: c.x + ex, y: c.y + ey });
         }
         break;
       }
@@ -111,7 +126,27 @@
         break;
       case "INSERT": {
         const p = pt(e.position);
-        if (p) out.push(p);
+        if (!p) break;
+        // Expand by the block's own geometry (translated by the insert
+        // point and scaled), instead of counting only the insertion
+        // point — a drawing made of blocks otherwise reports a near-zero
+        // size. Rotation is ignored: the fallback box is axis-aligned
+        // anyway, and the viewer's own bounds (used first) are exact.
+        // Recursion is capped so a self-referencing block cannot loop.
+        const block = dxf && dxf.blocks ? dxf.blocks[e.name] : null;
+        const blockEnts = block && Array.isArray(block.entities) ? block.entities : null;
+        if (!blockEnts || !blockEnts.length || (depth || 0) >= 3) {
+          out.push(p);
+          break;
+        }
+        const base = block.basePoint ? pt(block.basePoint) : { x: 0, y: 0 };
+        const sx = typeof e.xScale === "number" ? e.xScale : 1;
+        const sy = typeof e.yScale === "number" ? e.yScale : 1;
+        blockEnts.forEach((be) => {
+          entityExtentPoints(be, dxf, (depth || 0) + 1).forEach((bp) => {
+            out.push({ x: p.x + (bp.x - base.x) * sx, y: p.y + (bp.y - base.y) * sy });
+          });
+        });
         break;
       }
       case "SOLID":
@@ -127,7 +162,7 @@
   function computeBBox(dxf) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     entitiesOf(dxf).forEach((e) => {
-      entityExtentPoints(e).forEach((p) => {
+      entityExtentPoints(e, dxf, 0).forEach((p) => {
         if (p.x < minX) minX = p.x;
         if (p.y < minY) minY = p.y;
         if (p.x > maxX) maxX = p.x;
@@ -165,10 +200,14 @@
     return counts;
   }
 
-  /** Snap points for measure: endpoints, vertices, centres, midpoints. */
+  /** Snap points for measure: endpoints, vertices, centres, midpoints.
+   *  Circle/arc centres also carry their radius, so the radius tool can
+   *  report R and Ø from the same point. */
   function getSnapPoints(dxf) {
     const points = [];
-    const push = (p, kind) => { if (p) points.push({ x: p.x, y: p.y, kind }); };
+    const push = (p, kind, extra) => {
+      if (p) points.push({ x: p.x, y: p.y, kind, ...(extra || {}) });
+    };
     entitiesOf(dxf).forEach((e) => {
       if (!e || !e.type) return;
       switch (e.type) {
@@ -191,6 +230,8 @@
         }
         case "CIRCLE":
         case "ARC":
+          push(pt(e.center), "center", { radius: e.radius || 0 });
+          break;
         case "ELLIPSE":
           push(pt(e.center), "center");
           break;
@@ -232,22 +273,25 @@
   }
 
   // Millimetres in one ASSUMED unit, for unitless files (the unit select
-  // offers exactly mm / in / cm). Note this is keyed by NAME, unlike
-  // MM_PER_UNIT above which is keyed by $INSUNITS code.
-  const MM_PER_ASSUMED_UNIT = { mm: 1, in: 25.4, cm: 10 };
+  // offers exactly mm / in / cm / ft / m). Note this is keyed by NAME,
+  // unlike MM_PER_UNIT above which is keyed by $INSUNITS code.
+  const MM_PER_ASSUMED_UNIT = { mm: 1, in: 25.4, cm: 10, ft: 304.8, m: 1000 };
 
-  /** Format one dimension as "file units · mm · in", dropping any part
-   * that repeats an earlier one — a unitless file assumed in mm would
-   * otherwise read "44 mm · 44 mm · 1.73 in", and an inch file would
-   * repeat its own value as the inch conversion. */
+  /** Format one dimension as "file units \u00b7 mm \u00b7 in", dropping any part
+   *  that repeats an earlier one \u2014 a unitless file assumed in mm would
+   *  otherwise read "44 mm \u00b7 44 mm \u00b7 1.73 in", a millimetre file would
+   *  read "60 millimetres \u00b7 60 mm", and an inch file "10 inches \u00b7
+   *  10 in". The dedupe is by unit family, not by string: "60 mm" and
+   *  "60 millimetres" are the same measurement in different words. */
   function formatSize(valueInFileUnits, mmPerFileUnit, fileUnitsName, assumedUnit) {
     const mm = mmPerFileUnit === null
       ? valueInFileUnits * MM_PER_ASSUMED_UNIT[assumedUnit]
       : valueInFileUnits * mmPerFileUnit;
     const unitName = fileUnitsName || assumedUnit;
-    const parts = [`${fmt(valueInFileUnits)} ${unitName}`, `${fmt(mm)} mm`];
-    if (unitName !== "in") parts.push(`${fmt(mm / 25.4)} in`);
-    return [...new Set(parts)].join("  ·  ");
+    const parts = [`${fmt(valueInFileUnits)} ${unitName}`];
+    if (unitName !== "mm" && unitName !== "millimetres") parts.push(`${fmt(mm)} mm`);
+    if (unitName !== "in" && unitName !== "inches") parts.push(`${fmt(mm / 25.4)} in`);
+    return [...new Set(parts)].join("  \u00b7  ");
   }
 
   return {

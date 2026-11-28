@@ -20,6 +20,11 @@
 
 * { box-sizing: border-box; }
 
+/* The hidden attribute must win over author display rules: .view-buttons
+ * sets display:flex, which otherwise beats the UA [hidden] rule and
+ * left the STL Top/Front/Side buttons visible on DXF files. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -171,6 +176,16 @@ body {
 .dropzone-big { font-size: 18px; font-weight: 600; margin: 0 0 4px; color: #f9fafb; }
 .dropzone-small { color: #9ca3af; margin: 8px 0; }
 .dropzone.drag-over { background: rgba(37, 99, 235, 0.15); outline: 2px dashed var(--accent); outline-offset: -8px; }
+.sample-btn {
+  background: transparent;
+  color: #e5e7eb;
+  border-color: #4b5563;
+  padding: 5px 10px;
+  margin: 0 2px;
+}
+.sample-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.1); }
+.canvas-wrap.light .sample-btn { color: #1a1a1a; border-color: #d1d5db; }
+.canvas-wrap.light .sample-btn:hover:not(:disabled) { background: #f0f0f2; }
 .measure-overlay {
   position: absolute;
   inset: 0;

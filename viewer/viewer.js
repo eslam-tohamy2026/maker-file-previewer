@@ -1,9 +1,10 @@
 /* Maker File Previewer — viewer page logic.
-   DXF via the vendored dxf-viewer (main-thread parse in v1 — no worker
+   DXF via the vendored dxf-viewer (main-thread parse — no worker
    indirection to debug under MV3 CSP); STL via three.js STLLoader.
    All processing happens in this tab; nothing is uploaded anywhere.
-   The only fetch() in the shipped code is the one below, for a link the
-   user right-clicked (or a file:// URL the user asked to preview).
+   The only fetch() calls in the shipped code are for a link the user
+   right-clicked (or a file:// URL the user asked to preview) and for
+   the built-in sample files.
 */
 
 import { DxfViewer } from "dxf-viewer";
@@ -21,7 +22,19 @@ const ACADVER_NAMES = {
   AC1018: "R2004", AC1021: "R2007", AC1024: "R2010", AC1027: "R2013",
   AC1032: "R2018",
 };
-const MM_PER_UNIT = { mm: 1, in: 25.4, cm: 10 };
+const MM_PER_UNIT = { mm: 1, in: 25.4, cm: 10, ft: 304.8, m: 1000 };
+const UNIT_NAMES = { mm: "millimetres", in: "inches", cm: "centimetres", ft: "feet", m: "metres" };
+// $INSUNITS code → unit-select value, so a file drawn in feet or metres
+// shows its real unit instead of silently falling back to "mm".
+const UNIT_BY_INSUNITS = { 1: "in", 2: "ft", 4: "mm", 5: "cm", 6: "m" };
+// Link-preview errors, shown both live (message) and on startup
+// (session storage — a message sent to a tab that is still loading
+// would otherwise vanish without a trace).
+const PREVIEW_ERROR_TEXT = {
+  "permission-declined": "Link preview needs one-time access to that site — or download the file and drop it here.",
+  "fetch-failed": "Could not download that link. Check the link, or download the file and drop it here.",
+  "too-big-for-link": "That file is too big to pass through a link preview — download it and drop it here instead.",
+};
 
 const $ = (id) => document.getElementById(id);
 const wrap = $("canvas-wrap");
@@ -31,16 +44,20 @@ const statusEl = $("status");
 const errorEl = $("error");
 const infoList = $("info-list");
 const unitsWarning = $("units-warning");
+const unitsWarningText = $("units-warning-text");
 const layersSection = $("layers-section");
 const layerList = $("layer-list");
 const undrawnSection = $("undrawn-section");
 const undrawnList = $("undrawn-list");
 const fitBtn = $("fit");
 const measureBtn = $("measure");
+const radiusBtn = $("radius");
+const savePngBtn = $("save-png");
 const clearBtn = $("clear");
 const themeBtn = $("theme");
 const unitSelect = $("unit-select");
 const stlViews = $("stl-views");
+const wireframeBtn = $("wireframe");
 const measureOverlay = $("measure-overlay");
 const measureSvg = $("measure-svg");
 const measureLabel = $("measure-label");
@@ -51,11 +68,13 @@ const state = {
   dxfViewer: null,
   dxfModel: null,
   snapPoints: [], // scene coords (DXF) or three coords (STL)
-  stl: null, // { geometry, mesh, renderer, camera, controls, positions }
+  stl: null, // { geometry, mesh, renderer, camera, controls, positions, snapThreshold }
   measuring: false,
+  measureMode: "distance", // "distance" | "radius" (DXF circles/arcs only)
   measurePoints: [],
   assumedUnit: "mm",
   darkBg: true,
+  fileBytes: 0,
   mmPerFileUnit: null, // null when unitless (assumed unit applies)
   fileUnitsName: null,
 };
@@ -68,6 +87,12 @@ function showError(text) { setError(text); }
 function fmt(n, digits = 2) {
   if (!isFinite(n)) return "—";
   return Number(n).toFixed(digits).replace(/\.00$/, "");
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${fmt(n / 1024)} KB`;
+  return `${fmt(n / (1024 * 1024))} MB`;
 }
 
 function storeGet(keys) {
@@ -182,6 +207,9 @@ function updateUnitsWarning(isUnitless) {
   if (isUnitless) {
     unitSelect.disabled = false;
     unitSelect.title = "This file has no units — pick what one file unit means";
+    // The banner must name the CURRENT assumption: it used to keep
+    // saying "millimetres" after the user had switched to inches.
+    unitsWarningText.textContent = `Assuming ${UNIT_NAMES[state.assumedUnit]}. If the size looks 25.4× wrong, switch the unit above.`;
   } else {
     unitSelect.disabled = true;
     unitSelect.title = "Units come from the file ($INSUNITS)";
@@ -191,9 +219,12 @@ function updateUnitsWarning(isUnitless) {
 function setFileLoaded(name) {
   state.fileName = name;
   fileNameEl.textContent = name;
+  document.title = `${name} — Maker File Previewer`;
   wrap.classList.add("has-file");
   fitBtn.disabled = false;
   measureBtn.disabled = false;
+  radiusBtn.disabled = state.kind !== "dxf";
+  savePngBtn.disabled = false;
   clearBtn.disabled = false;
   setError("");
 }
@@ -222,7 +253,6 @@ function drawMeasure(points, livePoint) {
     measureSvg.append(line);
   }
   if (points.length === 2) {
-    const d = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
     const mid = { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
     measureLabel.style.left = `${mid.x}px`;
     measureLabel.style.top = `${mid.y}px`;
@@ -255,7 +285,7 @@ function ensureDxfViewer() {
 
 async function loadDxf(name, bytes) {
   if (DxfInfo.isBinaryDxf(bytes)) {
-    throw new Error("This is a binary DXF file, which v1 cannot preview. Save it as ASCII DXF in your CAD program and try again.");
+    throw new Error("This is a binary DXF file, which this viewer cannot preview. Save it as ASCII DXF in your CAD program and try again.");
   }
   const viewer = ensureDxfViewer();
   if (state.stl && state.stl.renderer) state.stl.renderer.domElement.style.display = "none";
@@ -263,12 +293,19 @@ async function loadDxf(name, bytes) {
   const blobUrl = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
   try {
     setStatus(`Parsing ${name}…`);
-    await viewer.Load({
-      url: blobUrl,
-      progressCbk: (phase, done, total) => {
-        if (total) setStatus(`Loading ${name}… ${Math.round((done / total) * 100)}%`);
-      },
-    });
+    try {
+      await viewer.Load({
+        url: blobUrl,
+        progressCbk: (phase, done, total) => {
+          if (total) setStatus(`Loading ${name}… ${Math.round((done / total) * 100)}%`);
+        },
+      });
+    } catch (err) {
+      // The parser's raw message ("Unexpected token", a bare group code)
+      // means nothing to the person holding the file. Say what it is
+      // and what to do: the usual cause is a DWG renamed to .dxf.
+      throw new Error(`Could not read this as a DXF drawing (${err.message || "parse error"}). It may be a DWG renamed to .dxf — save it as ASCII DXF in your CAD program and try again.`);
+    }
   } finally {
     URL.revokeObjectURL(blobUrl);
   }
@@ -280,13 +317,13 @@ async function loadDxf(name, bytes) {
   const units = DxfInfo.getUnits(dxf);
   state.mmPerFileUnit = units.mmPerUnit;
   state.fileUnitsName = units.code === 0 ? null : units.name;
-  if (units.code !== 0) unitSelect.value = units.code === 1 ? "in" : units.code === 5 ? "cm" : "mm";
+  if (units.code !== 0) unitSelect.value = UNIT_BY_INSUNITS[units.code] || "mm";
   const bounds = viewer.GetBounds() || DxfInfo.computeBBox(dxf);
   const counts = DxfInfo.getEntityCounts(dxf);
   const totalEntities = Object.values(counts).reduce((a, b) => a + b, 0);
   const origin = viewer.GetOrigin() || { x: 0, y: 0 };
   state.snapPoints = DxfInfo.getSnapPoints(dxf).map((p) => ({
-    x: p.x - origin.x, y: p.y - origin.y, kind: p.kind,
+    x: p.x - origin.x, y: p.y - origin.y, kind: p.kind, radius: p.radius,
   }));
   const version = dxf.header && dxf.header.$ACADVER
     ? `${ACADVER_NAMES[dxf.header.$ACADVER] || dxf.header.$ACADVER} (${dxf.header.$ACADVER})`
@@ -300,6 +337,7 @@ async function loadDxf(name, bytes) {
     ["Format", `DXF ${version}`],
     ["Units", units.code === 0 ? "none (unitless)" : `${units.name} ($INSUNITS = ${units.code})`],
     ["Size", bounds ? sizeText(bounds.maxX - bounds.minX) + "  ×  " + sizeText(bounds.maxY - bounds.minY) : "—"],
+    ["File size", formatBytes(bytes.length)],
     ["Entities", `${totalEntities} (${Object.entries(counts).map(([t, n]) => `${n} ${t}`).join(", ")})`],
   ]);
   renderLayers(layers);
@@ -307,7 +345,9 @@ async function loadDxf(name, bytes) {
   updateUnitsWarning(units.code === 0);
   stlViews.hidden = true;
   setFileLoaded(name);
-  setStatus(`Loaded ${name} — ${totalEntities} entities${bounds ? `, ${fmt(bounds.maxX - bounds.minX)} × ${fmt(bounds.maxY - bounds.minY)} ${state.fileUnitsName || state.assumedUnit}` : ""}.`);
+  setStatus(totalEntities === 0
+    ? `Loaded ${name} — no drawable entities. The file may be empty, or contain only types this viewer does not draw (see "Not drawn").`
+    : `Loaded ${name} — ${totalEntities} entities${bounds ? `, ${fmt(bounds.maxX - bounds.minX)} × ${fmt(bounds.maxY - bounds.minY)} ${state.fileUnitsName || state.assumedUnit}` : ""}.`);
 }
 
 // ---------- STL ----------
@@ -356,9 +396,18 @@ function ensureStlRenderer() {
 function loadStl(name, bytes) {
   const geometry = new STLLoader().parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   const positions = geometry.getAttribute("position").array;
+  const tris = StlOps.triangleCount(positions);
+  if (tris === 0) {
+    // A garbage file renamed to .stl parses to zero triangles instead
+    // of throwing — without this check the bbox below throws a bare
+    // TypeError about reading "min" of null.
+    geometry.dispose();
+    throw new Error("This STL has no triangles. It may not be an STL file at all, or it may be an empty export — check the file and try again.");
+  }
   const bbox = StlOps.computeBBox(positions);
   const volume = StlOps.computeVolume(positions);
-  const tris = StlOps.triangleCount(positions);
+  const surfaceArea = StlOps.computeSurfaceArea(positions);
+  const manifold = StlOps.checkManifold(positions);
 
   if (state.dxfViewer) {
     const canvas = state.dxfViewer.GetCanvas && state.dxfViewer.GetCanvas();
@@ -394,22 +443,43 @@ function loadStl(name, bytes) {
   stl.controls.target.set(center.x, center.y, center.z);
   stl.controls.update();
   const grid = stl.scene.getObjectByName("grid");
-  if (grid) grid.scale.setScalar(Math.max(1, maxSize / 10));
+  // Grid about four times the part, cells about a fifth of it: the old
+  // scale (a fixed 100 mm grid, at least 1x) dwarfed small parts.
+  if (grid) grid.scale.setScalar(Math.max(0.4, maxSize / 25));
+  // Snap threshold, cached once: recomputing the whole-mesh bounding
+  // box on every mouse move made measuring freeze on large meshes.
+  stl.snapThreshold = Math.hypot(bbox.size.x, bbox.size.y, bbox.size.z) * 0.02 || 1;
 
   state.kind = "stl";
   state.mmPerFileUnit = null; // STL has no units
   state.fileUnitsName = null;
+  // Surface area in file units², plus cm² — deduped like the Size line
+  // so a millimetre file does not repeat its own value.
+  const mmPerUnit = MM_PER_UNIT[state.assumedUnit];
+  const areaParts = [...new Set([
+    `${fmt(surfaceArea)} ${state.assumedUnit}²`,
+    `${fmt(surfaceArea * mmPerUnit * mmPerUnit / 100)} cm²`,
+  ])];
+  const watertightText = !manifold.checked
+    ? "Not checked — mesh too large for the edge check"
+    : (manifold.openEdges === 0 && manifold.nonManifoldEdges === 0)
+      ? "Yes — closed mesh"
+      : `No — ${manifold.openEdges} open edge${manifold.openEdges === 1 ? "" : "s"}${manifold.nonManifoldEdges ? `, ${manifold.nonManifoldEdges} non-manifold` : ""}; volume is approximate`;
   setInfoRows([
     ["Format", "STL (binary/ASCII)"],
     ["Units", "none — STL files have no units"],
     ["Size", `${sizeText(bbox.size.x)}  ×  ${sizeText(bbox.size.y)}  ×  ${sizeText(bbox.size.z)}`],
+    ["File size", formatBytes(bytes.length)],
     ["Triangles", `${tris}`],
-    ["Volume", `${fmt(volume)} ${state.assumedUnit}³  ·  ${fmt(volume / 1000)} cm³`],
+    ["Surface area", areaParts.join("  ·  ")],
+    ["Volume", `${fmt(volume)} ${state.assumedUnit}³  ·  ${fmt(volume * mmPerUnit * mmPerUnit * mmPerUnit / 1000)} cm³`],
+    ["Watertight", watertightText],
   ]);
   renderLayers([]);
   renderUndrawn({});
   updateUnitsWarning(true);
   stlViews.hidden = false;
+  wireframeBtn.classList.remove("active");
   setFileLoaded(name);
   setStatus(`Loaded ${name} — ${tris} triangles, ${fmt(bbox.size.x)} × ${fmt(bbox.size.y)} × ${fmt(bbox.size.z)} ${state.assumedUnit}.`);
 }
@@ -421,16 +491,21 @@ async function openFile(file) {
   const isDxf = lower.endsWith(".dxf");
   const isStl = lower.endsWith(".stl");
   if (!isDxf && !isStl) {
-    showError("Only .dxf and .stl files are supported in v1.");
+    showError("Only .dxf and .stl files are supported.");
     return;
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
+  state.fileBytes = bytes.length;
+  if (bytes.length === 0) {
+    showError("This file is empty (0 bytes).");
+    return;
+  }
   if (isDxf && bytes.length > MAX_DXF_BYTES) {
-    showError("This DXF is over 50 MB — too big for v1. Split it or simplify the drawing.");
+    showError("This DXF is over 50 MB — too big to preview. Split it or simplify the drawing.");
     return;
   }
   if (isStl && bytes.length > MAX_STL_BYTES) {
-    showError("This STL is over 150 MB — too big for v1.");
+    showError("This STL is over 150 MB — too big to preview.");
     return;
   }
   clearMeasure();
@@ -440,19 +515,24 @@ async function openFile(file) {
     else loadStl(name, bytes);
   } catch (err) {
     console.error(err);
-    showError(err.message || `Could not preview ${name}. The file may be corrupt or in a format v1 cannot read.`);
+    showError(err.message || `Could not preview ${name}. The file may be corrupt or in a format this viewer cannot read.`);
     setStatus("Could not preview that file.");
   }
 }
 
 // ---------- measure ----------
-function setMeasuring(on) {
+function setMeasuring(on, mode) {
   state.measuring = on;
-  measureBtn.classList.toggle("active", on);
+  if (on) state.measureMode = mode || state.measureMode;
+  measureBtn.classList.toggle("active", on && state.measureMode === "distance");
+  radiusBtn.classList.toggle("active", on && state.measureMode === "radius");
   measureOverlay.hidden = !on && state.measurePoints.length === 0;
   wrap.classList.toggle("measuring", on);
-  if (!on) clearMeasure();
-  else { measureOverlay.hidden = false; setStatus("Measure: click two points. Esc cancels."); }
+  if (!on) { clearMeasure(); return; }
+  measureOverlay.hidden = false;
+  setStatus(state.measureMode === "radius"
+    ? "Radius: click a circle or an arc. Esc cancels."
+    : "Measure: click two points. Esc cancels.");
 }
 function clearMeasure() {
   state.measurePoints = [];
@@ -473,9 +553,9 @@ function snapDxf(scenePoint, canvas) {
 }
 function snapStl(worldPoint) {
   if (!state.stl) return worldPoint;
-  const bbox = StlOps.computeBBox(state.stl.positions);
-  const diag = Math.hypot(bbox.size.x, bbox.size.y, bbox.size.z) || 1;
-  const threshold = diag * 0.02;
+  // Threshold cached at load: the old code recomputed the whole-mesh
+  // bounding box on every mouse move, which froze large meshes.
+  const threshold = state.stl.snapThreshold || 0;
   let best = null, bestD = Infinity;
   for (const p of state.snapPoints) {
     const d = Math.hypot(p.x - worldPoint.x, p.y - worldPoint.y, p.z - worldPoint.z);
@@ -500,14 +580,27 @@ function toCanvasPoint(p) {
 }
 function measureDistance(a, b) {
   if (state.kind === "dxf") {
-    const d = Math.hypot(b.x - a.x, b.y - a.y);
     const dx = b.x - a.x, dy = b.y - a.y;
-    return { d, text: `${fmt(d)} ${state.fileUnitsName || state.assumedUnit}  ·  ΔX ${fmt(dx)}  ·  ΔY ${fmt(dy)}`, mm: d * (state.mmPerFileUnit || MM_PER_UNIT[state.assumedUnit]) };
+    const d = Math.hypot(dx, dy);
+    return { d, dx, dy, dz: 0 };
   }
   const fa = stlToFilePoint(a), fb = stlToFilePoint(b);
   const dx = fb.x - fa.x, dy = fb.y - fa.y, dz = fb.z - fa.z;
   const d = Math.hypot(dx, dy, dz);
-  return { d, text: `${fmt(d)} ${state.assumedUnit}  ·  ΔX ${fmt(dx)}  ·  ΔY ${fmt(dy)}  ·  ΔZ ${fmt(dz)}`, mm: d * MM_PER_UNIT[state.assumedUnit] };
+  return { d, dx, dy, dz };
+}
+/** Distance readout: the deduped size plus the deltas, in file units.
+ *  v1 computed the deltas and then threw them away — the label showed
+ *  the distance only, although the feature promises ΔX/ΔY (+ΔZ). */
+function measureText(res) {
+  let text = `${DxfInfo.formatSize(res.d, state.mmPerFileUnit, state.fileUnitsName, state.assumedUnit)}  ·  ΔX ${fmt(res.dx)}  ·  ΔY ${fmt(res.dy)}`;
+  if (state.kind === "stl") text += `  ·  ΔZ ${fmt(res.dz)}`;
+  return text;
+}
+/** Radius readout for one clicked circle/arc (DXF only). */
+function radiusText(r) {
+  const size = (v) => DxfInfo.formatSize(v, state.mmPerFileUnit, state.fileUnitsName, state.assumedUnit);
+  return `R ${size(r)}  ·  Ø ${size(2 * r)}`;
 }
 function onMeasureClick(point3d, canvasPoint) {
   const snapped = state.kind === "dxf"
@@ -518,14 +611,37 @@ function onMeasureClick(point3d, canvasPoint) {
   if (state.measurePoints.length === 2) {
     const [a, b] = state.measurePoints;
     const res = measureDistance(a.model, b.model);
-    // Same deduped format as the Size line — the old text repeated the
-    // value ("44 mm (44 mm / 1.73 in)").
-    state.measureText = DxfInfo.formatSize(res.d, state.mmPerFileUnit, state.fileUnitsName, state.assumedUnit);
+    state.measureText = measureText(res);
     drawMeasure(state.measurePoints.map((p) => p.canvas));
     setStatus(`Measured: ${state.measureText}`);
   } else {
     drawMeasure(state.measurePoints.map((p) => p.canvas));
   }
+}
+/** Radius mode (DXF only): one click on a circle or arc reports its
+ *  radius and diameter. Clicking the centre works, and so does clicking
+ *  the circumference — whichever the click is closer to. */
+function onRadiusClick(scenePoint) {
+  const canvas = state.dxfViewer.GetCanvas();
+  const cam = state.dxfViewer.GetCamera();
+  const viewWidth = cam.right - cam.left;
+  const threshold = (viewWidth / canvas.clientWidth) * 12;
+  let best = null, bestD = Infinity;
+  for (const p of state.snapPoints) {
+    if (p.kind !== "center" || !p.radius) continue;
+    const dCentre = Math.hypot(p.x - scenePoint.x, p.y - scenePoint.y);
+    const dEdge = Math.abs(dCentre - p.radius);
+    const d = Math.min(dCentre, dEdge);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (!best || bestD > threshold) {
+    setStatus("Radius: click a circle or an arc.");
+    return;
+  }
+  state.measurePoints = [{ model: best, canvas: toCanvasPoint(best) }];
+  state.measureText = radiusText(best.radius);
+  drawMeasure(state.measurePoints.map((p) => p.canvas));
+  setStatus(`Radius: ${state.measureText}`);
 }
 function onMeasureMove(point3d) {
   if (state.measurePoints.length !== 1) return;
@@ -547,7 +663,8 @@ wrap.addEventListener("pointerup", (e) => {
   const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
   if (state.kind === "dxf") {
     const scenePt = state.dxfViewer.CanvasToSceneCoord(cx, cy);
-    onMeasureClick(scenePt, { x: cx, y: cy });
+    if (state.measureMode === "radius") onRadiusClick(scenePt);
+    else onMeasureClick(scenePt, { x: cx, y: cy });
   } else if (state.kind === "stl" && state.stl && state.stl.mesh) {
     const ndc = new THREE.Vector2((cx / rect.width) * 2 - 1, -(cy / rect.height) * 2 + 1);
     const ray = new THREE.Raycaster();
@@ -557,7 +674,7 @@ wrap.addEventListener("pointerup", (e) => {
   }
 });
 wrap.addEventListener("pointermove", (e) => {
-  if (!state.measuring || state.measurePoints.length !== 1 || !state.kind) return;
+  if (!state.measuring || state.measureMode !== "distance" || state.measurePoints.length !== 1 || !state.kind) return;
   const rect = wrap.getBoundingClientRect();
   const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
   if (state.kind === "dxf") {
@@ -575,7 +692,14 @@ wrap.addEventListener("pointermove", (e) => {
 fitBtn.addEventListener("click", () => {
   if (state.kind === "dxf" && state.dxfViewer) {
     const b = state.dxfViewer.GetBounds();
-    if (b) state.dxfViewer.FitView(b.minX, b.maxX, b.minY, b.maxY);
+    if (b) {
+      // GetBounds() is in drawing coordinates; FitView takes scene
+      // coordinates, so the origin comes off first — without this, Fit
+      // (and F) shifted the drawing by the origin whenever the first
+      // vertex was not at (0,0).
+      const o = state.dxfViewer.GetOrigin() || { x: 0, y: 0 };
+      state.dxfViewer.FitView(b.minX - o.x, b.maxX - o.x, b.minY - o.y, b.maxY - o.y);
+    }
   } else if (state.kind === "stl" && state.stl) {
     const bbox = StlOps.computeBBox(state.stl.positions);
     const center = {
@@ -589,16 +713,48 @@ fitBtn.addEventListener("click", () => {
     state.stl.controls.update();
   }
 });
-measureBtn.addEventListener("click", () => setMeasuring(!state.measuring));
+measureBtn.addEventListener("click", () => setMeasuring(!state.measuring || state.measureMode !== "distance", "distance"));
+radiusBtn.addEventListener("click", () => setMeasuring(!state.measuring || state.measureMode !== "radius", "radius"));
+wireframeBtn.addEventListener("click", () => {
+  if (!state.stl || !state.stl.mesh) return;
+  const mat = state.stl.mesh.material;
+  mat.wireframe = !mat.wireframe;
+  wireframeBtn.classList.toggle("active", mat.wireframe);
+});
+savePngBtn.addEventListener("click", () => {
+  // Render and capture in the same task: with preserveDrawingBuffer off
+  // (the default) the buffer is only valid until the next composite.
+  const base = (state.fileName || "preview").replace(/\.[^.]*$/, "") || "preview";
+  const done = (blob) => {
+    if (!blob) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${base}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    setStatus(`Saved ${base}.png`);
+  };
+  if (state.kind === "dxf" && state.dxfViewer) {
+    state.dxfViewer.Render();
+    const canvas = state.dxfViewer.GetCanvas && state.dxfViewer.GetCanvas();
+    if (canvas && canvas.toBlob) canvas.toBlob(done, "image/png");
+  } else if (state.kind === "stl" && state.stl) {
+    state.stl.renderer.render(state.stl.scene, state.stl.camera);
+    state.stl.renderer.domElement.toBlob(done, "image/png");
+  }
+});
 clearBtn.addEventListener("click", () => {
   if (state.dxfViewer) state.dxfViewer.Clear();
   if (state.stl && state.stl.mesh) { state.stl.scene.remove(state.stl.mesh); state.stl.mesh = null; }
   if (state.stl && state.stl.renderer) state.stl.renderer.domElement.style.display = "none";
   state.kind = null; state.dxfModel = null; state.snapPoints = [];
+  state.measureMode = "distance";
+  wireframeBtn.classList.remove("active");
   clearMeasure(); setMeasuring(false);
   wrap.classList.remove("has-file");
   fileNameEl.textContent = "No file yet";
-  fitBtn.disabled = true; measureBtn.disabled = true; clearBtn.disabled = true;
+  document.title = "Maker File Previewer";
+  fitBtn.disabled = true; measureBtn.disabled = true; radiusBtn.disabled = true; savePngBtn.disabled = true; clearBtn.disabled = true;
   layersSection.hidden = true; undrawnSection.hidden = true; stlViews.hidden = true;
   unitsWarning.hidden = true;
   setInfoRows([["Nothing loaded", "Drop a .dxf or .stl file, or right-click a link to preview it."]]);
@@ -608,11 +764,13 @@ clearBtn.addEventListener("click", () => {
 themeBtn.addEventListener("click", () => {
   state.darkBg = !state.darkBg;
   applyBackground();
+  storeSet({ darkBg: state.darkBg });
 });
 unitSelect.addEventListener("change", () => {
   state.assumedUnit = unitSelect.value;
   storeSet({ assumedUnit: state.assumedUnit });
   setStatus(`Unit assumption: 1 file unit = 1 ${state.assumedUnit}.`);
+  updateUnitsWarning(state.mmPerFileUnit === null); // banner names the new assumption
   // Re-render the info panel with the new assumption.
   if (state.kind === "dxf" && state.dxfModel) {
     const dxf = state.dxfModel;
@@ -624,17 +782,33 @@ unitSelect.addEventListener("change", () => {
       ["Format", `DXF ${dxf.header && dxf.header.$ACADVER ? (ACADVER_NAMES[dxf.header.$ACADVER] || dxf.header.$ACADVER) : "unknown"}`],
       ["Units", units.code === 0 ? "none (unitless)" : `${units.name} ($INSUNITS = ${units.code})`],
       ["Size", bounds ? sizeText(bounds.maxX - bounds.minX) + "  ×  " + sizeText(bounds.maxY - bounds.minY) : "—"],
+      ["File size", formatBytes(state.fileBytes)],
       ["Entities", `${total} (${Object.entries(counts).map(([t, n]) => `${n} ${t}`).join(", ")})`],
     ]);
   } else if (state.kind === "stl" && state.stl) {
     const bbox = StlOps.computeBBox(state.stl.positions);
     const volume = StlOps.computeVolume(state.stl.positions);
+    const surfaceArea = StlOps.computeSurfaceArea(state.stl.positions);
+    const manifold = StlOps.checkManifold(state.stl.positions);
+    const mmPerUnit = MM_PER_UNIT[state.assumedUnit];
+    const areaParts = [...new Set([
+      `${fmt(surfaceArea)} ${state.assumedUnit}²`,
+      `${fmt(surfaceArea * mmPerUnit * mmPerUnit / 100)} cm²`,
+    ])];
+    const watertightText = !manifold.checked
+      ? "Not checked — mesh too large for the edge check"
+      : (manifold.openEdges === 0 && manifold.nonManifoldEdges === 0)
+        ? "Yes — closed mesh"
+        : `No — ${manifold.openEdges} open edge${manifold.openEdges === 1 ? "" : "s"}${manifold.nonManifoldEdges ? `, ${manifold.nonManifoldEdges} non-manifold` : ""}; volume is approximate`;
     setInfoRows([
       ["Format", "STL (binary/ASCII)"],
       ["Units", "none — STL files have no units"],
       ["Size", `${sizeText(bbox.size.x)}  ×  ${sizeText(bbox.size.y)}  ×  ${sizeText(bbox.size.z)}`],
+      ["File size", formatBytes(state.fileBytes)],
       ["Triangles", `${StlOps.triangleCount(state.stl.positions)}`],
-      ["Volume", `${fmt(volume)} ${state.assumedUnit}³  ·  ${fmt(volume / 1000)} cm³`],
+      ["Surface area", areaParts.join("  ·  ")],
+      ["Volume", `${fmt(volume)} ${state.assumedUnit}³  ·  ${fmt(volume * mmPerUnit * mmPerUnit * mmPerUnit / 1000)} cm³`],
+      ["Watertight", watertightText],
     ]);
   }
 });
@@ -658,6 +832,24 @@ function setStlView(which) {
   state.stl.controls.update();
 }
 
+// ---------- built-in samples ----------
+// The viewer ships two small sample files so anyone opening the Pages
+// demo (or the extension with no file at hand) can try it immediately.
+async function loadSample(kind) {
+  const url = kind === "dxf" ? "samples/sample-bracket.dxf" : "samples/sample-box.stl";
+  try {
+    setStatus("Loading sample…");
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("http-" + res.status);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    openFile(new File([bytes], url.split("/").pop()));
+  } catch (err) {
+    showError("Could not load the sample file. If you opened this page from disk, serve the extension folder or use the GitHub Pages link instead — or drop in one of your own files.");
+  }
+}
+$("sample-dxf").addEventListener("click", () => loadSample("dxf"));
+$("sample-stl").addEventListener("click", () => loadSample("stl"));
+
 // ---------- file input / drag-drop ----------
 $("choose-file").addEventListener("click", () => $("file-input").click());
 $("file-input").addEventListener("change", (e) => {
@@ -678,7 +870,18 @@ wrap.addEventListener("drop", (e) => {
 });
 
 // ---------- context-menu preview (from background.js) ----------
+function showPreviewError(kind) {
+  showError(PREVIEW_ERROR_TEXT[kind] || "Could not preview that link. Download the file and drop it here instead.");
+}
 async function checkPendingPreview() {
+  // A link-preview error can arrive while this tab is still loading, in
+  // which case the live message is missed — the worker also stashes it
+  // in session storage, so it is shown here instead of vanishing.
+  const pendingErr = await sessionGet("pendingError");
+  if (pendingErr && pendingErr.kind) {
+    sessionRemove("pendingError");
+    if (Date.now() - (pendingErr.at || 0) <= 10 * 60 * 1000) showPreviewError(pendingErr.kind);
+  }
   const pending = await sessionGet("pendingPreview");
   if (!pending || !pending.bytes) return;
   sessionRemove("pendingPreview");
@@ -701,20 +904,15 @@ onMessage((msg) => {
   if (!msg) return;
   if (msg.type === "preview-pending") checkPendingPreview();
   else if (msg.type === "preview-url") previewUrl(msg.url);
-  else if (msg.type === "preview-error" && msg.kind === "permission-declined") {
-    showError("Link preview needs one-time access to that site — or download the file and drop it here.");
-  } else if (msg.type === "preview-error" && msg.kind === "fetch-failed") {
-    showError("Could not download that link. Check the link, or download the file and drop it here.");
-  } else if (msg.type === "preview-error" && msg.kind === "too-big-for-link") {
-    showError("That file is too big to pass through a link preview — download it and drop it here instead.");
-  }
+  else if (msg.type === "preview-error" && msg.kind) showPreviewError(msg.kind);
 });
 
 // ---------- keyboard ----------
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") { if (state.measuring) setMeasuring(false); }
   else if ((e.key === "f" || e.key === "F") && state.kind) fitBtn.click();
-  else if ((e.key === "m" || e.key === "M") && state.kind) setMeasuring(!state.measuring);
+  else if ((e.key === "m" || e.key === "M") && state.kind) setMeasuring(!state.measuring || state.measureMode !== "distance", "distance");
+  else if ((e.key === "r" || e.key === "R") && state.kind === "dxf") setMeasuring(!state.measuring || state.measureMode !== "radius", "radius");
 });
 
 // ---------- cross-promotion (plain navigation, no network in code) ----------
@@ -726,10 +924,14 @@ $("promo-fiverr").addEventListener("click", () => {
 });
 
 // ---------- startup ----------
-storeGet({ assumedUnit: "mm" }).then((prefs) => {
+storeGet({ assumedUnit: "mm", darkBg: true }).then((prefs) => {
   if (prefs.assumedUnit && MM_PER_UNIT[prefs.assumedUnit]) {
     state.assumedUnit = prefs.assumedUnit;
     unitSelect.value = prefs.assumedUnit;
+  }
+  if (typeof prefs.darkBg === "boolean" && prefs.darkBg !== state.darkBg) {
+    state.darkBg = prefs.darkBg;
+    applyBackground();
   }
 });
 checkPendingPreview();

@@ -1,6 +1,7 @@
 /* Maker File Previewer — Node tests for viewer/dxfinfo.js.
    Parses a hand-made DXF and the 3 real example DXFs from the
-   LaserCut DXF Generator with the REAL vendored parser, then checks
+   LaserCut DXF Generator (vendored copies in tests/fixtures — see the
+   note at EXAMPLES below) with the REAL vendored parser, then checks
    the pure model functions.
    Run: node --test tests/test_dxfinfo.mjs
 */
@@ -17,7 +18,12 @@ const require = createRequire(import.meta.url);
 const DxfInfo = require("../viewer/dxfinfo.js");
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const EXAMPLES = path.join(HERE, "..", "..", "dxf-generator-work", "examples");
+// Fixtures are vendored copies of the LaserCut DXF Generator's example
+// files (taken 2026-11-28), NOT a live reference into that repo: the
+// generator's v2 rebuild regenerated its examples mid-flight (610 -> 685
+// wide, $INSUNITS now set), which broke these tests from outside.
+// This repo's tests must only depend on files this repo owns.
+const EXAMPLES = path.join(HERE, "fixtures");
 
 const HANDMADE_DXF = [
   "  0", "SECTION", "  2", "HEADER",
@@ -77,10 +83,10 @@ test("generator gear DXF: bbox is the 44 mm tip circle", () => {
   assert.deepEqual(DxfInfo.getUnsupported(dxf), {});
 });
 
-test("generator box DXF: 610 x 80 layout, 6 panels", () => {
+test("generator box DXF: 685 x 80 layout, 6 panels", () => {
   const dxf = parseText(fs.readFileSync(path.join(EXAMPLES, "box_100x80x60_t3.dxf"), "utf8"));
   const bbox = DxfInfo.computeBBox(dxf);
-  assert.ok(Math.abs(bbox.width - 610) < 0.01, `width ${bbox.width}`);
+  assert.ok(Math.abs(bbox.width - 685) < 0.01, `width ${bbox.width}`);
   assert.ok(Math.abs(bbox.height - 80) < 0.01, `height ${bbox.height}`);
 });
 
@@ -92,11 +98,24 @@ test("generator bracket DXF: 60 x 40 with 4 circles", () => {
   assert.equal(DxfInfo.getEntityCounts(dxf).CIRCLE, 4);
 });
 
-test("generator files are unitless ($INSUNITS unset) — honest warning case", () => {
+test("generator fixture files declare millimetres ($INSUNITS = 4)", () => {
   for (const name of ["gear_m2_z20.dxf", "box_100x80x60_t3.dxf", "bracket_60x40.dxf"]) {
     const dxf = parseText(fs.readFileSync(path.join(EXAMPLES, name), "utf8"));
-    assert.equal(DxfInfo.getUnits(dxf).code, 0, name);
+    assert.equal(DxfInfo.getUnits(dxf).code, 4, name);
   }
+});
+
+test("a DXF with no $INSUNITS at all is unitless — the honest-warning case", () => {
+  const dxf = parseText([
+    "  0", "SECTION", "  2", "HEADER",
+    "  9", "$ACADVER", "  1", "AC1009",
+    "  0", "ENDSEC",
+    "  0", "SECTION", "  2", "ENTITIES",
+    "  0", "LINE", "  8", "0",
+    " 10", "0.0", " 20", "0.0", " 11", "100.0", " 21", "0.0",
+    "  0", "ENDSEC", "  0", "EOF",
+  ].join("\n"));
+  assert.equal(DxfInfo.getUnits(dxf).code, 0);
 });
 
 test("binary DXF sentinel is detected", () => {

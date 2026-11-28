@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Maker File Previewer</title>
+<link rel="icon" href="../icons/icon32.png">
 <link rel="stylesheet" href="styles.css">
 <script type="importmap">
 {
@@ -31,17 +32,22 @@
     <span id="file-name" class="file-name">No file yet</span>
     <button id="fit" class="btn btn-ghost" disabled title="Fit the drawing to the window (F)">Fit</button>
     <button id="measure" class="btn btn-ghost" disabled title="Measure between two points (M)">Measure</button>
+    <button id="radius" class="btn btn-ghost" disabled title="Measure a circle's radius — click a circle or arc (R)">Radius</button>
     <span class="view-buttons" id="stl-views" hidden>
       <button id="view-top" class="btn btn-ghost" title="Top view">Top</button>
       <button id="view-front" class="btn btn-ghost" title="Front view">Front</button>
       <button id="view-side" class="btn btn-ghost" title="Side view">Side</button>
+      <button id="wireframe" class="btn btn-ghost" title="Toggle wireframe view">Wireframe</button>
     </span>
+    <button id="save-png" class="btn btn-ghost" disabled title="Save the current view as a PNG image">Save PNG</button>
     <label class="unit-label" title="What one file unit means">
       Unit
       <select id="unit-select" class="unit-select">
         <option value="mm" selected>mm</option>
         <option value="in">inch</option>
         <option value="cm">cm</option>
+        <option value="ft">feet</option>
+        <option value="m">metre</option>
       </select>
     </label>
     <button id="theme" class="btn btn-ghost" title="Switch drawing background">Light bg</button>
@@ -70,7 +76,7 @@
       <h2>Not drawn</h2>
       <ul id="undrawn-list" class="layer-list"></ul>
     </div>
-    <p class="hint">Drag to pan, scroll to zoom. Press <b>M</b> to measure, <b>F</b> to fit, <b>Esc</b> to cancel.</p>
+    <p class="hint">Drag to pan, scroll to zoom. Press <b>M</b> to measure, <b>R</b> for a circle's radius, <b>F</b> to fit, <b>Esc</b> to cancel.</p>
     <p class="privacy">No upload. No account. No tracking. Everything happens in this tab.</p>
     <p class="cross-promo">Made a DXF? <span class="promo-link" id="promo-generator">Generate one with the LaserCut DXF Generator</span><br>
     Need it cut or modelled? <span class="promo-link" id="promo-fiverr">CNC / laser DXF files on Fiverr</span></p>
@@ -82,6 +88,10 @@
         <p class="dropzone-big">Drop a .dxf or .stl file here</p>
         <p class="dropzone-small">or</p>
         <button id="choose-file" class="btn btn-primary">Choose a file</button>
+        <p class="dropzone-small">No file handy?
+          <button id="sample-dxf" class="btn sample-btn">Try a sample DXF</button>
+          <button id="sample-stl" class="btn sample-btn">Try a sample STL</button>
+        </p>
         <p class="dropzone-small">Right-click any .dxf / .stl link → “Preview with Maker File Previewer”.</p>
       </div>
       <div id="measure-overlay" class="measure-overlay" hidden>

@@ -1,13 +1,13 @@
 {
   "name": "maker-previewer-work",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "",
   "main": "index.js",
   "directories": {
     "test": "tests"
   },
   "scripts": {
-    "test": "node --test tests/test_dxfinfo.mjs tests/test_stlops.mjs tests/test_vendored_modules.mjs tests/test_dxf_load.mjs"
+    "test": "node --test tests/test_dxfinfo.mjs tests/test_stlops.mjs tests/test_vendored_modules.mjs tests/test_dxf_load.mjs tests/test_v2.mjs"
   },
   "keywords": [],
   "author": "",
